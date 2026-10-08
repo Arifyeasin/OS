@@ -37,6 +37,10 @@ async function request(method, path, body) {
     data = text; // SRS routes return HTML/Markdown
   }
 
+  if (typeof data === 'string' && data.trim().startsWith('<') && !cleanPath.includes('/srs')) {
+    throw new Error('Server returned an unexpected page instead of API data.');
+  }
+
   if (!res.ok) throw new Error((data && data.error) || `Request failed (${res.status}).`);
   return data;
 }

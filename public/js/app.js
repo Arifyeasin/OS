@@ -29,8 +29,12 @@ function toast(message, bad = false) {
 function openModal(title, html, onReady, isWide = false) {
   el('modalTitle').textContent = title;
   el('modalBody').innerHTML = html;
+  if (el('modalBody')) el('modalBody').scrollTop = 0;
   const card = el('modal').querySelector('.modal-card');
-  if (card) card.classList.toggle('modal-lg', Boolean(isWide));
+  if (card) {
+    card.scrollTop = 0;
+    card.classList.toggle('modal-lg', Boolean(isWide));
+  }
   el('modal').classList.remove('hidden');
   if (onReady) onReady();
 }
@@ -47,25 +51,26 @@ const emptyState = (icon, text) => `<div class="empty"><div class="big">${icon}<
 // ------------------------------------------------------------ sign in -----
 
 function processOAuthResult() {
-  const params = new URLSearchParams(location.hash.slice(1));
-  const oauthToken = params.get('oauth_token');
-  const oauthError = params.get('oauth_error');
+  const hashParams = new URLSearchParams(location.hash.replace(/^#\/?/, ''));
+  const searchParams = new URLSearchParams(location.search);
+  const oauthToken = hashParams.get('oauth_token') || searchParams.get('oauth_token') || hashParams.get('auth_token') || searchParams.get('auth_token');
+  const oauthError = hashParams.get('oauth_error') || searchParams.get('oauth_error') || hashParams.get('auth_error') || searchParams.get('auth_error');
+
   if (!oauthToken && !oauthError) return;
-  history.replaceState(null, '', location.pathname + location.search);
-  if (oauthToken) token.set(oauthToken);
+
+  history.replaceState(null, '', location.pathname);
+
+  if (oauthToken) {
+    token.set(oauthToken);
+  }
   if (oauthError) {
-    el('authError').textContent = oauthError;
-    el('authError').classList.remove('hidden');
+    const errorBox = el('authError');
+    if (errorBox) {
+      errorBox.textContent = decodeURIComponent(oauthError);
+      errorBox.classList.remove('hidden');
+    }
   }
 }
-
-document.querySelectorAll('[data-oauth-provider]').forEach((button) => {
-  button.addEventListener('click', () => {
-    button.disabled = true;
-    const base = location.pathname.startsWith('/OS') ? '/OS/api' : '/api';
-    location.assign(`${base}/auth/${button.dataset.oauthProvider}`);
-  });
-});
 
 let authMode = 'login';
 
@@ -76,6 +81,18 @@ function setAuthMode(mode) {
   el('authSubmit').textContent = mode === 'login' ? 'Sign in' : 'Create account';
   el('authPassword').autocomplete = mode === 'login' ? 'current-password' : 'new-password';
   el('authError').classList.add('hidden');
+
+  const createNote = el('createNote');
+  if (createNote) {
+    createNote.innerHTML = mode === 'login'
+      ? 'Don\'t have an account? <button type="button" data-auth-mode="register">Create one</button>'
+      : 'Already have an account? <button type="button" data-auth-mode="login">Sign in</button>';
+  }
+
+  const subtitle = document.querySelector('.auth-subtitle');
+  if (subtitle) {
+    subtitle.textContent = mode === 'login' ? 'Sign in to your account to continue' : 'Create a new account to get started';
+  }
 }
 
 el('authTabs').addEventListener('click', (e) => {
@@ -89,45 +106,77 @@ async function setupSocialLogin() {
 
   Object.entries(buttons).forEach(([provider, button]) => {
     if (!button) return;
-    button.addEventListener('click', async () => {
+    button.addEventListener('click', () => {
       button.disabled = true;
-      const originalHtml = button.innerHTML;
       button.innerHTML = '<span class="spinner"></span> Connecting...';
-      try {
-        const providers = await api.get('/auth/providers').catch(() => ({}));
-        if (!providers[provider]) {
-          button.disabled = false;
-          button.innerHTML = originalHtml;
-          const name = provider === 'google' ? 'Google' : 'GitHub';
-          el('authError').textContent = `${name} OAuth is not configured on the server. Please verify ${provider === 'google' ? 'GOOGLE_CLIENT_ID' : 'GITHUB_CLIENT_ID'} in .env.`;
-          el('authError').classList.remove('hidden');
-          return;
-        }
-        window.location.href = `/api/auth/${provider}`;
-      } catch (err) {
-        button.disabled = false;
-        button.innerHTML = originalHtml;
-        el('authError').textContent = err.message || 'Could not initiate social login.';
-        el('authError').classList.remove('hidden');
-      }
+      const base = location.pathname.startsWith('/OS') ? '/OS/api' : '/api';
+      location.assign(`${base}/auth/${provider}`);
     });
   });
+}
 
-  try {
-    const providers = await api.get('/auth/providers');
-    Object.entries(buttons).forEach(([provider, button]) => {
-      if (!button) return;
-      const enabled = Boolean(providers[provider]);
-      const name = provider === 'google' ? 'Google' : 'GitHub';
-      button.title = enabled ? `Continue with ${name}` : `${name} login is not configured in .env`;
-      button.style.opacity = enabled ? '1' : '0.85';
-    });
-  } catch {
-    // Keep defaults if API is warming up
+function setupResetPasswordModal() {
+  const modal = el('resetModal');
+  const openBtn = el('forgotPasswordBtn');
+  const closeBtn = el('resetModalClose');
+  const cancelBtn = el('resetCancelBtn');
+  const form = el('resetPasswordForm');
+  const errorBox = el('resetError');
+  const submitBtn = el('resetSubmitBtn');
+
+  if (!modal || !form) return;
+
+  function openReset() {
+    errorBox.classList.add('hidden');
+    el('resetEmail').value = el('authEmail').value.trim();
+    el('resetNewPassword').value = '';
+    modal.classList.remove('hidden');
+    if (el('resetEmail').value) {
+      el('resetNewPassword').focus();
+    } else {
+      el('resetEmail').focus();
+    }
   }
+
+  function closeReset() {
+    modal.classList.add('hidden');
+  }
+
+  if (openBtn) openBtn.addEventListener('click', openReset);
+  if (closeBtn) closeBtn.addEventListener('click', closeReset);
+  if (cancelBtn) cancelBtn.addEventListener('click', closeReset);
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) closeReset();
+  });
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    errorBox.classList.add('hidden');
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = '<span class="spinner"></span> Saving...';
+
+    const email = el('resetEmail').value.trim();
+    const password = el('resetNewPassword').value;
+
+    try {
+      const { token: jwt, user } = await api.post('/auth/reset-password', { email, password });
+      token.set(jwt);
+      state.user = user;
+      closeReset();
+      toast('Password updated successfully! Welcome back.');
+      await startApp();
+    } catch (err) {
+      errorBox.textContent = err.message;
+      errorBox.classList.remove('hidden');
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Update & Sign in';
+    }
+  });
 }
 
 setupSocialLogin();
+setupResetPasswordModal();
 
 el('auth').addEventListener('click', (e) => {
   const control = e.target.closest('[data-auth-mode]');
@@ -166,34 +215,271 @@ el('logoutBtn').addEventListener('click', () => { token.clear(); location.reload
 el('modalClose').addEventListener('click', closeModal);
 el('modal').addEventListener('click', (e) => { if (e.target.id === 'modal') closeModal(); });
 
+// -------------------------------------------------------- sidebar controls --
+
+function isMobileView() {
+  return window.innerWidth <= 900;
+}
+
+function setSidebarOpen(open, persist = true) {
+  const app = el('app');
+  if (!app) return;
+  const isMobile = isMobileView();
+
+  if (isMobile) {
+    app.classList.toggle('sidebar-open', open);
+    app.classList.remove('sidebar-closed');
+  } else {
+    app.classList.toggle('sidebar-closed', !open);
+    app.classList.remove('sidebar-open');
+    if (persist) {
+      try {
+        localStorage.setItem('engineeros_sidebar_open', open ? '1' : '0');
+      } catch (_) {}
+    }
+  }
+
+  const toggleBtn = el('sidebarToggleBtn');
+  if (toggleBtn) {
+    toggleBtn.setAttribute('aria-expanded', String(open));
+    toggleBtn.title = open ? 'Collapse sidebar (Ctrl+B)' : 'Expand sidebar (Ctrl+B)';
+  }
+}
+
+function toggleSidebar() {
+  const app = el('app');
+  if (!app) return;
+  const isMobile = isMobileView();
+  const currentlyOpen = isMobile
+    ? app.classList.contains('sidebar-open')
+    : !app.classList.contains('sidebar-closed');
+  setSidebarOpen(!currentlyOpen);
+}
+
+function initSidebarState() {
+  const isMobile = isMobileView();
+  if (isMobile) {
+    setSidebarOpen(false, false);
+  } else {
+    try {
+      const saved = localStorage.getItem('engineeros_sidebar_open');
+      const shouldOpen = saved !== '0';
+      setSidebarOpen(shouldOpen, false);
+    } catch (_) {
+      setSidebarOpen(true, false);
+    }
+  }
+}
+
+el('sidebarToggleBtn')?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  toggleSidebar();
+});
+
+el('sidebarCloseBtn')?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  setSidebarOpen(false);
+});
+
+el('sidebarBackdrop')?.addEventListener('click', () => {
+  setSidebarOpen(false);
+});
+
+// Auto-close drawer on mobile when navigating
+el('nav')?.addEventListener('click', (e) => {
+  if (e.target.closest('.nav-item') && isMobileView()) {
+    setSidebarOpen(false);
+  }
+});
+
+// Global keyboard shortcuts: Esc to close mobile sidebar, Ctrl+B / Cmd+B to toggle
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    const app = el('app');
+    if (app && app.classList.contains('sidebar-open')) {
+      setSidebarOpen(false);
+    }
+  } else if ((e.ctrlKey || e.metaKey) && (e.key === 'b' || e.key === 'B')) {
+    e.preventDefault();
+    toggleSidebar();
+  }
+});
+
+window.addEventListener('resize', () => {
+  const app = el('app');
+  if (!app) return;
+  if (!isMobileView()) {
+    app.classList.remove('sidebar-open');
+    try {
+      const saved = localStorage.getItem('engineeros_sidebar_open');
+      app.classList.toggle('sidebar-closed', saved === '0');
+    } catch (_) {}
+  } else {
+    app.classList.remove('sidebar-closed');
+  }
+});
+
+initSidebarState();
+
 // -------------------------------------------------------------- boot ------
 
+const PRESET_AVATARS = [
+  { name: 'Developer', url: 'https://api.dicebear.com/7.x/bottts/svg?seed=Developer' },
+  { name: 'Cyber', url: 'https://api.dicebear.com/7.x/bottts/svg?seed=Cyber' },
+  { name: 'Architect', url: 'https://api.dicebear.com/7.x/bottts/svg?seed=Matrix' },
+  { name: 'Nova', url: 'https://api.dicebear.com/7.x/bottts/svg?seed=Nova' },
+  { name: 'Alex', url: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Alex' },
+  { name: 'Sam', url: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Sam' },
+  { name: 'Jordan', url: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Jordan' },
+  { name: 'Identicon', url: 'https://api.dicebear.com/7.x/identicon/svg?seed=EngineerOS' },
+];
+
+function renderUserAvatar(target, user) {
+  const node = typeof target === 'string' ? el(target) : target;
+  if (!node) return;
+  const name = user?.name || 'User';
+  const initial = name.charAt(0).toUpperCase() || '?';
+  const avatarUrl = String(user?.avatar_url || '').trim();
+
+  if (avatarUrl) {
+    node.innerHTML = `<img src="${esc(avatarUrl)}" alt="${esc(name)}" onerror="this.onerror=null;this.parentElement.textContent='${esc(initial)}';this.parentElement.classList.remove('has-photo');">`;
+    node.classList.add('has-photo');
+  } else {
+    node.textContent = initial;
+    node.classList.remove('has-photo');
+  }
+}
+
+function updateAppUserUI() {
+  if (!state.user) return;
+  if (el('userName')) el('userName').textContent = state.user.name;
+  if (el('userRole')) el('userRole').textContent = state.user.role;
+  if (el('topUserName')) el('topUserName').textContent = state.user.name;
+  renderUserAvatar('userAvatar', state.user);
+  renderUserAvatar('topAvatar', state.user);
+}
+
+function compressImageFile(file, maxWidth = 256, maxHeight = 256, quality = 0.88) {
+  return new Promise((resolve, reject) => {
+    if (!file || !file.type.startsWith('image/')) {
+      return reject(new Error('Please select an image file (PNG, JPG, WebP, SVG, GIF).'));
+    }
+    if (file.type === 'image/svg+xml') {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(new Error('Could not read SVG file.'));
+      reader.readAsDataURL(file);
+      return;
+    }
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Failed to read image file.'));
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('Failed to parse image.'));
+      img.onload = () => {
+        let width = img.width;
+        let height = img.height;
+        if (width > maxWidth || height > maxHeight) {
+          const ratio = Math.min(maxWidth / width, maxHeight / height);
+          width = Math.round(width * ratio);
+          height = Math.round(height * ratio);
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, width, height);
+        const format = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
+        try {
+          const dataUrl = canvas.toDataURL(format, quality);
+          resolve(dataUrl);
+        } catch {
+          resolve(e.target.result);
+        }
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 async function startApp() {
+  initSidebarState();
   el('auth').classList.add('hidden');
   el('app').classList.remove('hidden');
 
-  el('userName').textContent = state.user.name;
-  el('userRole').textContent = state.user.role;
-  el('userAvatar').textContent = state.user.name.charAt(0).toUpperCase();
-  el('topUserName').textContent = state.user.name;
-  el('topAvatar').textContent = state.user.name.charAt(0).toUpperCase();
+  updateAppUserUI();
 
   ['userName', 'userAvatar', 'topUserName', 'topAvatar'].forEach((id) => {
     const node = el(id);
     if (node) {
       node.style.cursor = 'pointer';
-      node.title = 'Click to edit profile & GitHub identity';
+      node.title = 'Click to edit profile, photo & GitHub identity';
       node.onclick = openProfileModal;
     }
   });
+
+  const accountPill = document.querySelector('.app-account');
+  if (accountPill) {
+    accountPill.style.cursor = 'pointer';
+    accountPill.title = 'Click to edit profile, photo & GitHub identity';
+    accountPill.onclick = openProfileModal;
+  }
 
   state.users = await api.get('/auth/users').catch(() => []);
   await loadProjects();
 }
 
 function openProfileModal() {
-  openModal('User Profile & GitHub Identity', `
-    <p class="muted" style="margin-top:0;font-size:13px">Manage your developer profile and link your GitHub account to discover all your projects.</p>
+  let currentAvatar = String(state.user.avatar_url || '').trim();
+
+  openModal('User Profile & Developer Identity', `
+    <p class="muted" style="margin-top:0;font-size:13px">Manage your developer profile, custom avatar photo, and GitHub identity.</p>
+
+    <!-- Profile Image / Avatar Section -->
+    <div class="profile-avatar-card">
+      <div class="profile-avatar-main-row">
+        <div class="profile-avatar-preview-wrap">
+          <div class="profile-avatar-preview" id="profAvatarPreview">
+            ${currentAvatar
+              ? `<img src="${esc(currentAvatar)}" alt="${esc(state.user.name)}">`
+              : esc(state.user.name.charAt(0).toUpperCase())}
+          </div>
+          <span class="profile-avatar-badge" id="profAvatarBadge" title="Avatar status">${currentAvatar ? '✓' : '•'}</span>
+        </div>
+        <div class="profile-avatar-details">
+          <div class="profile-avatar-title">Profile Picture & Avatar</div>
+          <p class="profile-avatar-desc">Displayed on your sidebar, navbar, team views, and system comments.</p>
+          <div class="profile-avatar-actions">
+            <input type="file" id="profAvatarFile" accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml" style="display:none">
+            <button type="button" class="btn small primary" id="profUploadBtn"><span>📁 Upload Photo</span></button>
+            <button type="button" class="btn small ghost" id="profSyncGithubBtn" title="Sync avatar with GitHub username"><span>🐙 Use GitHub Photo</span></button>
+            <button type="button" class="btn small ghost" id="profUrlToggleBtn" title="Use external image URL"><span>🔗 Image URL</span></button>
+            <button type="button" class="btn small ghost danger" id="profRemoveImgBtn" title="Remove photo and use initials"><span>✕ Reset</span></button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Quick Preset Avatars -->
+      <div class="profile-presets-row">
+        <span class="profile-presets-label">Preset Avatars:</span>
+        <div class="profile-presets-list" id="profPresetsList">
+          ${PRESET_AVATARS.map((p) => `
+            <button type="button" class="profile-preset-chip ${currentAvatar === p.url ? 'active' : ''}" data-url="${esc(p.url)}" title="${esc(p.name)}">
+              <img src="${esc(p.url)}" alt="${esc(p.name)}" loading="lazy">
+            </button>
+          `).join('')}
+        </div>
+      </div>
+
+      <!-- Custom Image URL Input -->
+      <div class="profile-url-box ${currentAvatar && !currentAvatar.startsWith('data:') && !PRESET_AVATARS.some(p => p.url === currentAvatar) ? '' : 'hidden'}" id="profUrlBox">
+        <input type="url" id="profAvatarUrl" placeholder="https://images.unsplash.com/... or https://..." value="${esc(currentAvatar.startsWith('data:') ? '' : currentAvatar)}">
+        <button type="button" class="btn small primary" id="profApplyUrlBtn">Apply URL</button>
+      </div>
+    </div>
+
+    <!-- Personal & Role Fields -->
     <div class="field">
       <label for="profName">Display Name</label>
       <input id="profName" value="${esc(state.user.name)}">
@@ -206,10 +492,12 @@ function openProfileModal() {
       <label for="profRole">Role</label>
       <input id="profRole" value="${esc(state.user.role)}" disabled style="opacity:0.7">
     </div>
+
+    <!-- GitHub Integration Fields -->
     <div class="field">
       <label for="profGithub">GitHub Username <span class="muted">(your GitHub profile handle)</span></label>
-      <input id="profGithub" value="${esc(state.user.github_username || '')}" placeholder="e.g. purnata-c or octocat">
-      <p class="hint" style="text-align:left;margin-top:4px">Allows EngineerOS to automatically list all your repositories across your projects.</p>
+      <input id="profGithub" value="${esc(state.user.github_username || '')}" placeholder="e.g. octocat or torvalds">
+      <p class="hint" style="text-align:left;margin-top:4px">Allows EngineerOS to automatically list all your repositories and sync profile photos.</p>
     </div>
     <div class="field">
       <label for="profToken">Personal Access Token (PAT) <span class="muted">(optional, for private repos & workflows)</span></label>
@@ -219,25 +507,131 @@ function openProfileModal() {
     <p class="error hidden" id="profError"></p>
     <button class="btn primary block" id="profSave">Save Profile</button>
   `, () => {
+    const previewEl = el('profAvatarPreview');
+    const badgeEl = el('profAvatarBadge');
+    const fileInput = el('profAvatarFile');
+    const urlBox = el('profUrlBox');
+    const urlInput = el('profAvatarUrl');
+    const nameInput = el('profName');
+    const githubInput = el('profGithub');
+
+    function updatePreview(url) {
+      currentAvatar = String(url || '').trim();
+      const currentName = nameInput.value.trim() || state.user.name || 'User';
+      const initial = currentName.charAt(0).toUpperCase() || '?';
+
+      if (currentAvatar) {
+        previewEl.innerHTML = `<img src="${esc(currentAvatar)}" alt="Profile photo preview" onerror="this.onerror=null;this.parentElement.textContent='${esc(initial)}';this.parentElement.classList.remove('has-photo');">`;
+        previewEl.classList.add('has-photo');
+        badgeEl.textContent = '✓';
+        badgeEl.title = 'Photo active';
+      } else {
+        previewEl.textContent = initial;
+        previewEl.classList.remove('has-photo');
+        badgeEl.textContent = '•';
+        badgeEl.title = 'Default initials avatar';
+      }
+
+      document.querySelectorAll('#profPresetsList .profile-preset-chip').forEach((chip) => {
+        chip.classList.toggle('active', chip.dataset.url === currentAvatar);
+      });
+    }
+
+    nameInput.addEventListener('input', () => {
+      if (!currentAvatar) updatePreview('');
+    });
+
+    el('profUploadBtn').addEventListener('click', () => {
+      fileInput.click();
+    });
+
+    fileInput.addEventListener('change', async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      try {
+        const compressed = await compressImageFile(file);
+        updatePreview(compressed);
+        if (urlInput) urlInput.value = '';
+        toast('Image loaded! Click "Save Profile" to apply.');
+      } catch (err) {
+        toast(err.message, 'bad');
+      }
+    });
+
+    el('profSyncGithubBtn').addEventListener('click', () => {
+      const ghUser = githubInput.value.trim().replace(/^@/, '');
+      if (!ghUser) {
+        githubInput.focus();
+        githubInput.style.borderColor = 'var(--bad)';
+        setTimeout(() => { githubInput.style.borderColor = ''; }, 2000);
+        toast('Please enter your GitHub Username first.', 'bad');
+        return;
+      }
+      const ghAvatarUrl = `https://github.com/${ghUser}.png?size=200`;
+      updatePreview(ghAvatarUrl);
+      if (urlInput) urlInput.value = ghAvatarUrl;
+      toast(`Fetched GitHub avatar for @${ghUser}!`);
+    });
+
+    el('profUrlToggleBtn').addEventListener('click', () => {
+      urlBox.classList.toggle('hidden');
+      if (!urlBox.classList.contains('hidden')) {
+        urlInput.focus();
+        if (currentAvatar && !currentAvatar.startsWith('data:')) {
+          urlInput.value = currentAvatar;
+        }
+      }
+    });
+
+    el('profApplyUrlBtn').addEventListener('click', () => {
+      const url = urlInput.value.trim();
+      if (!url) {
+        toast('Please enter a valid image URL.', 'bad');
+        return;
+      }
+      updatePreview(url);
+      toast('Image URL applied!');
+    });
+
+    el('profPresetsList').addEventListener('click', (e) => {
+      const chip = e.target.closest('.profile-preset-chip');
+      if (!chip) return;
+      const url = chip.dataset.url;
+      updatePreview(url);
+      if (urlInput) urlInput.value = url;
+    });
+
+    el('profRemoveImgBtn').addEventListener('click', () => {
+      fileInput.value = '';
+      if (urlInput) urlInput.value = '';
+      updatePreview('');
+      toast('Photo removed. Using initials avatar.');
+    });
+
     el('profSave').addEventListener('click', async () => {
-      const name = el('profName').value.trim();
-      const githubUsername = el('profGithub').value.trim();
+      const name = nameInput.value.trim();
+      const githubUsername = githubInput.value.trim();
       const githubToken = el('profToken').value.trim();
+
+      const saveBtn = el('profSave');
+      saveBtn.disabled = true;
+      saveBtn.innerHTML = '<span class="spinner"></span> Saving...';
+
       try {
         const res = await api.patch('/auth/profile', {
           name,
+          avatar_url: currentAvatar,
           github_username: githubUsername,
           ...(githubToken ? { github_token: githubToken } : {}),
         });
         state.user = res.user;
-        el('userName').textContent = state.user.name;
-        el('topUserName').textContent = state.user.name;
-        el('userAvatar').textContent = state.user.name.charAt(0).toUpperCase();
-        el('topAvatar').textContent = state.user.name.charAt(0).toUpperCase();
+        updateAppUserUI();
         closeModal();
-        toast('Profile updated!');
-        if (state.view === 'github') render();
+        toast('Profile updated successfully!');
+        if (state.view === 'github' || state.view === 'team') render();
       } catch (err) {
+        saveBtn.disabled = false;
+        saveBtn.textContent = 'Save Profile';
         el('profError').textContent = err.message;
         el('profError').classList.remove('hidden');
       }
@@ -395,13 +789,13 @@ async function renderDashboard() {
       <div class="overview-grid"><div><span class="overview-label">Project name</span><strong>${esc(state.project.name)}</strong></div><div><span class="overview-label">Description</span><p>${esc(state.project.description || 'No description saved.')}</p></div><div><span class="overview-label">Status</span><span class="pill green">Active</span></div><div><span class="overview-label">Created</span><span>${esc(state.project.created_at || '—')}</span></div></div>
     </div>
     <div class="grid cols-4 dashboard-stats">
-      <div class="stat dashboard-stat"><div class="stat-icon blue">◉</div><div class="label">Project health <span>›</span></div><div class="value" style="color:${a.health >= 75 ? 'var(--ok)' : a.health >= 45 ? 'var(--warn)' : 'var(--bad)'}">${a.health}</div>
+      <div class="stat dashboard-stat" data-dashboard-view="requirements" style="cursor:pointer" title="Click to view requirements"><div class="stat-icon blue">◉</div><div class="label">Project health <span>›</span></div><div class="value" style="color:${a.health >= 75 ? 'var(--ok)' : a.health >= 45 ? 'var(--warn)' : 'var(--bad)'}">${a.health}</div>
         <div class="sub">out of 100</div>${meter(a.health)}</div>
-      <div class="stat dashboard-stat"><div class="stat-icon violet">▤</div><div class="label">Requirements <span>›</span></div><div class="value">${a.totals.requirements}</div>
+      <div class="stat dashboard-stat" data-dashboard-view="requirements" style="cursor:pointer" title="Click to view requirements"><div class="stat-icon violet">▤</div><div class="label">Requirements <span>›</span></div><div class="value">${a.totals.requirements}</div>
         <div class="sub">${a.totals.functional} functional &middot; ${a.totals.nonFunctional} non-functional</div></div>
-      <div class="stat dashboard-stat"><div class="stat-icon teal">▣</div><div class="label">Sprint progress <span>›</span></div><div class="value">${a.points.progress}%</div>
+      <div class="stat dashboard-stat" data-dashboard-view="board" style="cursor:pointer" title="Click to view sprint board"><div class="stat-icon teal">▣</div><div class="label">Sprint progress <span>›</span></div><div class="value">${a.points.progress}%</div>
         <div class="sub">${a.points.done} of ${a.points.total} story points</div>${meter(a.points.progress)}</div>
-      <div class="stat dashboard-stat"><div class="stat-icon rose">⬡</div><div class="label">Open defects <span>›</span></div><div class="value" style="color:${a.totals.openBugs ? 'var(--bad)' : 'var(--ok)'}">${a.totals.openBugs}</div>
+      <div class="stat dashboard-stat" data-dashboard-view="bugs" style="cursor:pointer" title="Click to view bug tracker"><div class="stat-icon rose">⬡</div><div class="label">Open defects <span>›</span></div><div class="value" style="color:${a.totals.openBugs ? 'var(--bad)' : 'var(--ok)'}">${a.totals.openBugs}</div>
         <div class="sub">${a.bySeverity.critical} critical &middot; ${a.bySeverity.high} high</div></div>
     </div>
 
@@ -1262,79 +1656,402 @@ async function renderBoard() {
 
 // --------------------------------------------------------------- bugs -----
 
-async function renderBugs() {
-  const [bugs, tasks] = await Promise.all([api.get(`${P()}/bugs`), api.get(`${P()}/tasks`)]);
+let bugSeverityFilter = 'all';
+let bugStatusFilter = 'all';
+let bugSearchQuery = '';
+let currentBugs = [];
+let currentTasks = [];
+
+async function renderBugs(fetchFresh = true) {
+  if (fetchFresh || !currentBugs.length) {
+    try {
+      const [bugsData, tasksData] = await Promise.all([api.get(`${P()}/bugs`), api.get(`${P()}/tasks`)]);
+      currentBugs = Array.isArray(bugsData) ? bugsData : (bugsData?.bugs || []);
+      currentTasks = Array.isArray(tasksData) ? tasksData : [];
+    } catch (err) {
+      el('view').innerHTML = `<div class="card"><p class="error">${esc(err.message)}</p></div>`;
+      return;
+    }
+  }
+
+  const bugs = currentBugs;
+  const tasks = currentTasks;
   el('topbarActions').innerHTML = '<button class="btn primary" id="newBugBtn">+ Report a bug</button>';
 
+  // Calculate live counts
+  const counts = {
+    all: bugs.length,
+    open: bugs.filter((b) => b.status === 'open').length,
+    in_progress: bugs.filter((b) => b.status === 'in_progress').length,
+    resolved: bugs.filter((b) => b.status === 'resolved').length,
+    critical: bugs.filter((b) => b.severity === 'critical' && b.status !== 'resolved').length,
+    high: bugs.filter((b) => b.severity === 'high' && b.status !== 'resolved').length,
+    medium: bugs.filter((b) => b.severity === 'medium' && b.status !== 'resolved').length,
+    low: bugs.filter((b) => b.severity === 'low' && b.status !== 'resolved').length,
+  };
+
+  // Filter bugs
+  const q = bugSearchQuery.trim().toLowerCase();
+  const filteredBugs = bugs.filter((b) => {
+    if (bugStatusFilter !== 'all' && b.status !== bugStatusFilter) return false;
+    if (bugSeverityFilter !== 'all' && b.severity !== bugSeverityFilter) return false;
+    if (q) {
+      const matchTitle = (b.title || '').toLowerCase().includes(q);
+      const matchDetail = (b.detail || '').toLowerCase().includes(q);
+      const matchTask = (b.task_title || '').toLowerCase().includes(q);
+      const matchId = String(b.id) === q || `#${b.id}` === q;
+      if (!matchTitle && !matchDetail && !matchTask && !matchId) return false;
+    }
+    return true;
+  });
+
+  const hasFilters = bugSeverityFilter !== 'all' || bugStatusFilter !== 'all' || Boolean(q);
+  const hadSearchFocus = document.activeElement && document.activeElement.id === 'bugSearchInput';
+
   el('view').innerHTML = `
+    <!-- Clickable severity stat cards -->
     <div class="grid cols-4" style="margin-bottom:16px">
-      ${['critical', 'high', 'medium', 'low'].map((s) => `
-        <div class="stat"><div class="label">${s}</div>
-          <div class="value" style="color:${s === 'critical' || s === 'high' ? 'var(--bad)' : s === 'medium' ? 'var(--warn)' : 'var(--muted)'}">
-            ${bugs.filter((b) => b.severity === s && b.status !== 'resolved').length}</div>
-          <div class="sub">open</div></div>`).join('')}
+      ${['critical', 'high', 'medium', 'low'].map((s) => {
+        const active = bugSeverityFilter === s;
+        const color = s === 'critical' || s === 'high' ? 'var(--bad)' : s === 'medium' ? 'var(--warn)' : 'var(--muted)';
+        return `
+          <div class="stat clickable-card ${active ? 'active-filter-card' : ''}" data-sev-card="${s}" title="Click to filter by ${s} severity">
+            <div class="row" style="justify-content:space-between;align-items:center">
+              <div class="label" style="text-transform:capitalize;font-weight:600">${s}</div>
+              ${active ? '<span class="pill red" style="font-size:10px;padding:2px 6px">Filtering</span>' : ''}
+            </div>
+            <div class="value" style="color:${color}">${counts[s]}</div>
+            <div class="sub">${active ? '✕ Click to show all' : 'open • click to filter'}</div>
+          </div>`;
+      }).join('')}
     </div>
+
+    <!-- Search & Filter Controls -->
+    <div class="card" style="margin-bottom:14px;padding:12px 16px">
+      <div class="bug-filter-bar">
+        <div class="bug-search-box">
+          <span class="search-icon">🔍</span>
+          <input id="bugSearchInput" type="text" placeholder="Search bugs by title, steps, task, or #id…" value="${esc(bugSearchQuery)}">
+          ${bugSearchQuery ? '<button class="clear-btn" id="bugSearchClear" title="Clear search">&times;</button>' : ''}
+        </div>
+        <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
+          <div class="tab-group">
+            ${[
+              ['all', `All (${counts.all})`],
+              ['open', `Open (${counts.open})`],
+              ['in_progress', `In Progress (${counts.in_progress})`],
+              ['resolved', `Resolved (${counts.resolved})`],
+            ].map(([val, label]) => `
+              <button class="btn ${bugStatusFilter === val ? 'primary' : ''}" data-status-btn="${val}">${label}</button>
+            `).join('')}
+          </div>
+          <select id="bugSeveritySelect" style="width:auto;padding:6px 10px;font-size:13px">
+            <option value="all" ${bugSeverityFilter === 'all' ? 'selected' : ''}>All severities</option>
+            <option value="critical" ${bugSeverityFilter === 'critical' ? 'selected' : ''}>Critical (${counts.critical} open)</option>
+            <option value="high" ${bugSeverityFilter === 'high' ? 'selected' : ''}>High (${counts.high} open)</option>
+            <option value="medium" ${bugSeverityFilter === 'medium' ? 'selected' : ''}>Medium (${counts.medium} open)</option>
+            <option value="low" ${bugSeverityFilter === 'low' ? 'selected' : ''}>Low (${counts.low} open)</option>
+          </select>
+          ${hasFilters ? `<button class="btn ghost small" id="bugResetBtn" style="color:var(--brand);font-weight:600">✕ Reset</button>` : ''}
+        </div>
+      </div>
+      ${hasFilters ? `
+        <div class="muted row" style="font-size:12px;margin-top:8px;gap:8px;align-items:center">
+          <span>Showing <strong>${filteredBugs.length}</strong> of <strong>${bugs.length}</strong> bugs</span>
+          ${bugSeverityFilter !== 'all' ? `<span class="pill ${SEVERITY_PILL[bugSeverityFilter] || 'grey'}">${bugSeverityFilter}</span>` : ''}
+          ${bugStatusFilter !== 'all' ? `<span class="pill grey">${BUG_STATUS_LABEL[bugStatusFilter] || bugStatusFilter}</span>` : ''}
+          ${q ? `<span>Query: "<em>${esc(bugSearchQuery)}</em>"</span>` : ''}
+        </div>
+      ` : ''}
+    </div>
+
+    <!-- Bugs Table or Empty State -->
     <div class="card">
-      ${bugs.length ? `<table>
-        <thead><tr><th>Severity</th><th>Title</th><th>Linked task</th><th>Status</th><th></th></tr></thead>
-        <tbody>${bugs.map((b) => `
-          <tr>
-            <td><span class="pill ${SEVERITY_PILL[b.severity]}">${esc(b.severity)}</span></td>
-            <td><strong>${esc(b.title)}</strong>${b.detail ? `<div class="muted" style="font-size:13px">${esc(b.detail)}</div>` : ''}</td>
-            <td class="muted">${esc(b.task_title || '—')}</td>
-            <td><select data-bug="${b.id}" style="width:auto;padding:5px 8px;font-size:13px">
-              ${Object.entries(BUG_STATUS_LABEL).map(([s, label]) => `<option value="${s}" ${b.status === s ? 'selected' : ''}>${label}</option>`).join('')}
-            </select></td>
-            <td><button class="btn ghost small danger" data-del-bug="${b.id}">Delete</button></td>
-          </tr>`).join('')}</tbody></table>`
-        : emptyState('⬤', 'No defects reported. Nice.')}
+      ${filteredBugs.length ? `
+        <table>
+          <thead>
+            <tr>
+              <th style="width:65px">ID</th>
+              <th style="width:105px">Severity</th>
+              <th>Title & Details</th>
+              <th style="width:160px">Linked Task</th>
+              <th style="width:135px">Status</th>
+              <th style="width:165px;text-align:right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${filteredBugs.map((b) => `
+              <tr data-bug-row="${b.id}">
+                <td class="muted" style="font-size:12.5px;font-family:monospace;cursor:pointer" data-view-bug="${b.id}" title="Click to view details">#${b.id}</td>
+                <td><span class="pill ${SEVERITY_PILL[b.severity] || 'grey'}">${esc(b.severity)}</span></td>
+                <td>
+                  <div class="bug-clickable-title" data-view-bug="${b.id}" title="Click to view details and edit">${esc(b.title)}</div>
+                  ${b.detail ? `
+                    <div class="muted" style="font-size:12.5px;margin-top:2px;max-width:520px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(b.detail.slice(0, 300))}">
+                      ${esc(b.detail.slice(0, 150))}${b.detail.length > 150 ? '…' : ''}
+                    </div>
+                  ` : ''}
+                </td>
+                <td class="muted" style="font-size:13px">
+                  ${b.task_title ? `<span title="${esc(b.task_title)}">${esc(b.task_title)}</span>` : '<span style="opacity:0.4">—</span>'}
+                </td>
+                <td>
+                  <select data-bug-status="${b.id}" style="width:auto;padding:5px 8px;font-size:12.5px">
+                    ${Object.entries(BUG_STATUS_LABEL).map(([s, label]) => `
+                      <option value="${s}" ${b.status === s ? 'selected' : ''}>${label}</option>
+                    `).join('')}
+                  </select>
+                </td>
+                <td style="text-align:right">
+                  <button class="btn ghost small" data-view-bug="${b.id}" style="margin-right:4px">View / Edit</button>
+                  <button class="btn ghost small danger" data-del-bug="${b.id}">Delete</button>
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      ` : hasFilters ? `
+        <div style="text-align:center;padding:36px 20px">
+          <div style="font-size:28px;margin-bottom:8px">🔍</div>
+          <h4>No matching defects found</h4>
+          <p class="muted" style="margin-bottom:12px">No bugs match your current search and filter criteria.</p>
+          <button class="btn ghost small" id="bugClearEmptyBtn" style="color:var(--brand);font-weight:600">Clear all filters</button>
+        </div>
+      ` : emptyState('⬤', 'No defects reported. Nice.')}
     </div>`;
 
-  el('view').addEventListener('change', async (e) => {
-    const id = e.target.dataset?.bug;
-    if (!id) return;
-    await api.patch(`${P()}/bugs/${id}`, { status: e.target.value });
-    toast('Bug status updated.');
-    render();
-  });
-  el('view').addEventListener('click', async (e) => {
-    const id = e.target.dataset?.delBug;
-    if (!id) return;
-    await api.del(`${P()}/bugs/${id}`);
-    toast('Bug deleted.');
-    render();
-  });
+  // Restore search focus if user was typing
+  if (hadSearchFocus) {
+    const inp = el('bugSearchInput');
+    if (inp) {
+      inp.focus();
+      inp.setSelectionRange(inp.value.length, inp.value.length);
+    }
+  }
 
-  el('newBugBtn').addEventListener('click', () => {
-    openModal('Report a bug', `
-      <div class="field"><label for="bTitle">Title</label><input id="bTitle" placeholder="Upload fails for files over 10 MB"></div>
-      <div class="field"><label for="bDetail">Steps to reproduce</label><textarea id="bDetail" rows="4"></textarea></div>
-      <div class="row">
-        <div class="field grow"><label for="bSeverity">Severity</label>
-          <select id="bSeverity">${['critical', 'high', 'medium', 'low'].map((s) => `<option ${s === 'medium' ? 'selected' : ''}>${s}</option>`).join('')}</select></div>
-        <div class="field grow"><label for="bTask">Linked task</label>
-          <select id="bTask"><option value="">None</option>${tasks.map((t) => `<option value="${t.id}">${esc(t.title)}</option>`).join('')}</select></div>
-      </div>
-      <p class="error hidden" id="bError"></p>
-      <button class="btn primary block" id="bSave">Report bug</button>
-    `, () => {
-      el('bTitle').focus();
-      el('bSave').addEventListener('click', async () => {
-        try {
-          const out = await api.post(`${P()}/bugs`, {
-            title: el('bTitle').value,
-            detail: el('bDetail').value,
-            severity: el('bSeverity').value,
-            task_id: el('bTask').value || null,
-          });
-          closeModal();
-          toast(out.duplicateOf ? `Reported. Possible duplicate of "${out.duplicateOf}".` : 'Bug reported.');
-          render();
-        } catch (err) {
-          el('bError').textContent = err.message;
-          el('bError').classList.remove('hidden');
-        }
+  // Attach event handlers inside el('view')
+  const viewEl = el('view');
+
+  const searchInput = el('bugSearchInput');
+  if (searchInput) {
+    searchInput.addEventListener('input', (e) => {
+      bugSearchQuery = e.target.value;
+      renderBugs(false);
+    });
+  }
+
+  const searchClear = el('bugSearchClear');
+  if (searchClear) {
+    searchClear.addEventListener('click', () => {
+      bugSearchQuery = '';
+      renderBugs(false);
+    });
+  }
+
+  const resetBtn = el('bugResetBtn');
+  if (resetBtn) {
+    resetBtn.addEventListener('click', () => {
+      bugSeverityFilter = 'all';
+      bugStatusFilter = 'all';
+      bugSearchQuery = '';
+      renderBugs(false);
+    });
+  }
+
+  const clearEmptyBtn = el('bugClearEmptyBtn');
+  if (clearEmptyBtn) {
+    clearEmptyBtn.addEventListener('click', () => {
+      bugSeverityFilter = 'all';
+      bugStatusFilter = 'all';
+      bugSearchQuery = '';
+      renderBugs(false);
+    });
+  }
+
+  const sevSelect = el('bugSeveritySelect');
+  if (sevSelect) {
+    sevSelect.addEventListener('change', (e) => {
+      bugSeverityFilter = e.target.value;
+      renderBugs(false);
+    });
+  }
+
+  // Click delegation
+  viewEl.onclick = async (e) => {
+    // 1. Severity card click
+    const sevCard = e.target.closest('[data-sev-card]');
+    if (sevCard) {
+      const sev = sevCard.dataset.sevCard;
+      bugSeverityFilter = (bugSeverityFilter === sev) ? 'all' : sev;
+      renderBugs(false);
+      return;
+    }
+
+    // 2. Status tab click
+    const statusBtn = e.target.closest('[data-status-btn]');
+    if (statusBtn) {
+      bugStatusFilter = statusBtn.dataset.statusBtn;
+      renderBugs(false);
+      return;
+    }
+
+    // 3. View / Edit Bug Modal
+    const viewBtn = e.target.closest('[data-view-bug]');
+    if (viewBtn) {
+      const bugId = Number(viewBtn.dataset.viewBug);
+      const bug = bugs.find((b) => b.id === bugId);
+      if (bug) openEditBugModal(bug, tasks);
+      return;
+    }
+
+    // 4. Delete Bug
+    const delBtn = e.target.closest('[data-del-bug]');
+    if (delBtn) {
+      const bugId = Number(delBtn.dataset.delBug);
+      const bug = bugs.find((b) => b.id === bugId);
+      const confirmMsg = bug ? `Delete bug "${bug.title}"?` : 'Delete this bug?';
+      if (!confirm(confirmMsg)) return;
+      try {
+        await api.del(`${P()}/bugs/${bugId}`);
+        toast('Bug deleted.');
+        renderBugs(true);
+      } catch (err) {
+        toast(err.message, true);
+      }
+      return;
+    }
+  };
+
+  // Status select change delegation
+  viewEl.onchange = async (e) => {
+    const statusSelect = e.target.closest('[data-bug-status]');
+    if (statusSelect) {
+      const bugId = Number(statusSelect.dataset.bugStatus);
+      const newStatus = statusSelect.value;
+      try {
+        await api.patch(`${P()}/bugs/${bugId}`, { status: newStatus });
+        toast(`Bug #${bugId} marked as ${BUG_STATUS_LABEL[newStatus] || newStatus}.`);
+        const b = bugs.find((x) => x.id === bugId);
+        if (b) b.status = newStatus;
+        renderBugs(true);
+      } catch (err) {
+        toast(err.message, true);
+      }
+    }
+  };
+
+  // Report bug button
+  const newBugBtn = el('newBugBtn');
+  if (newBugBtn) {
+    newBugBtn.onclick = () => {
+      openModal('Report a bug', `
+        <div class="field"><label for="bTitle">Title</label><input id="bTitle" placeholder="e.g. Upload fails for files over 10 MB"></div>
+        <div class="field"><label for="bDetail">Steps to reproduce & details</label><textarea id="bDetail" rows="4" placeholder="1. Go to settings&#10;2. Click upload&#10;3. Observe crash"></textarea></div>
+        <div class="row">
+          <div class="field grow"><label for="bSeverity">Severity</label>
+            <select id="bSeverity">${['critical', 'high', 'medium', 'low'].map((s) => `<option ${s === 'medium' ? 'selected' : ''}>${s}</option>`).join('')}</select></div>
+          <div class="field grow"><label for="bTask">Linked task</label>
+            <select id="bTask"><option value="">None</option>${tasks.map((t) => `<option value="${t.id}">${esc(t.title)}</option>`).join('')}</select></div>
+        </div>
+        <p class="error hidden" id="bError"></p>
+        <button class="btn primary block" id="bSave">Report bug</button>
+      `, () => {
+        el('bTitle').focus();
+        el('bSave').addEventListener('click', async () => {
+          try {
+            const out = await api.post(`${P()}/bugs`, {
+              title: el('bTitle').value,
+              detail: el('bDetail').value,
+              severity: el('bSeverity').value,
+              task_id: el('bTask').value || null,
+            });
+            closeModal();
+            toast(out.duplicateOf ? `Reported. Possible duplicate of "${out.duplicateOf}".` : 'Bug reported.');
+            renderBugs(true);
+          } catch (err) {
+            el('bError').textContent = err.message;
+            el('bError').classList.remove('hidden');
+          }
+        });
       });
+    };
+  }
+}
+
+function openEditBugModal(bug, tasks) {
+  openModal(`Bug #${bug.id} Details`, `
+    <div class="field">
+      <label for="editBTitle">Title</label>
+      <input id="editBTitle" value="${esc(bug.title)}">
+    </div>
+    <div class="field">
+      <label for="editBDetail">Steps to reproduce & description</label>
+      <textarea id="editBDetail" rows="5" placeholder="Steps to reproduce, expected vs actual behavior...">${esc(bug.detail || '')}</textarea>
+    </div>
+    <div class="row">
+      <div class="field grow">
+        <label for="editBSeverity">Severity</label>
+        <select id="editBSeverity">
+          ${['critical', 'high', 'medium', 'low'].map((s) => `
+            <option value="${s}" ${bug.severity === s ? 'selected' : ''}>${s.toUpperCase()}</option>
+          `).join('')}
+        </select>
+      </div>
+      <div class="field grow">
+        <label for="editBStatus">Status</label>
+        <select id="editBStatus">
+          ${Object.entries(BUG_STATUS_LABEL).map(([s, label]) => `
+            <option value="${s}" ${bug.status === s ? 'selected' : ''}>${label}</option>
+          `).join('')}
+        </select>
+      </div>
+    </div>
+    <div class="field">
+      <label for="editBTask">Linked task</label>
+      <select id="editBTask">
+        <option value="">None</option>
+        ${tasks.map((t) => `<option value="${t.id}" ${bug.task_id === t.id ? 'selected' : ''}>${esc(t.title)}</option>`).join('')}
+      </select>
+    </div>
+    <p class="error hidden" id="editBError"></p>
+    <div class="row" style="justify-content:space-between;margin-top:16px">
+      <button class="btn ghost danger" id="editBDel">Delete bug</button>
+      <div class="row" style="gap:8px">
+        <button class="btn ghost" id="editBCancel">Cancel</button>
+        <button class="btn primary" id="editBSave">Save changes</button>
+      </div>
+    </div>
+  `, () => {
+    el('editBTitle').focus();
+    el('editBCancel').addEventListener('click', closeModal);
+    el('editBDel').addEventListener('click', async () => {
+      if (!confirm(`Delete bug "${bug.title}"?`)) return;
+      try {
+        await api.del(`${P()}/bugs/${bug.id}`);
+        closeModal();
+        toast('Bug deleted.');
+        renderBugs(true);
+      } catch (err) {
+        el('editBError').textContent = err.message;
+        el('editBError').classList.remove('hidden');
+      }
+    });
+    el('editBSave').addEventListener('click', async () => {
+      const title = el('editBTitle').value.trim();
+      const detail = el('editBDetail').value.trim();
+      const severity = el('editBSeverity').value;
+      const status = el('editBStatus').value;
+      const task_id = el('editBTask').value || null;
+
+      try {
+        await api.patch(`${P()}/bugs/${bug.id}`, { title, detail, severity, status, task_id });
+        closeModal();
+        toast('Bug updated successfully.');
+        renderBugs(true);
+      } catch (err) {
+        el('editBError').textContent = err.message;
+        el('editBError').classList.remove('hidden');
+      }
     });
   });
 }
@@ -1407,32 +2124,27 @@ async function renderTrace() {
       </div>`).join('')
     : emptyState('⇄', 'Add requirements and link tasks to them to build the traceability matrix.')}
 
-    ${t.orphanTasks.length ? `<div class="card">
+    ${t.orphanTasks.length ? `<div class="card" style="margin-top:16px">
       <h3>Tasks not traced to a requirement</h3>
       ${t.orphanTasks.map((task) => `<div class="trace-item">${esc(task.title)} <span class="pill grey">${STATUS_LABEL[task.status]}</span></div>`).join('')}
+    </div>` : ''}
+
+    ${(t.orphanBugs && t.orphanBugs.length) ? `<div class="card" style="margin-top:16px">
+      <h3>Defects not traced to requirements</h3>
+      ${t.orphanBugs.map((b) => `<div class="trace-item" style="display:flex;justify-content:space-between;align-items:center">
+        <div><span class="pill ${SEVERITY_PILL[b.severity] || 'grey'}">${esc(b.severity)}</span> <strong style="margin-left:6px">#${b.id}</strong> ${esc(b.title)}</div>
+        <span class="pill ${b.status === 'resolved' ? 'green' : b.status === 'in_progress' ? 'blue' : 'amber'}">${BUG_STATUS_LABEL[b.status] || b.status}</span>
+      </div>`).join('')}
     </div>` : ''}`;
 }
 
 // -------------------------------------------------------- code review -----
 
-async function renderReview() {
-  el('view').innerHTML = `
-    <div class="grid cols-2">
-      <div class="card">
-        <h3>Submit code for review</h3>
-        <div class="field"><label for="cvName">File name</label><input id="cvName" value="auth.js"></div>
-        <div class="field">
-          <label for="cvCode">Source</label>
-          <textarea id="cvCode" rows="16" spellcheck="false" style="font-family:ui-monospace,Consolas,monospace;font-size:13px"></textarea>
-        </div>
-        <button class="btn primary block" id="cvRun">Review code</button>
-      </div>
-      <div class="card" id="cvResult">
-        ${emptyState('⌘', 'Paste a snippet and run the review to see smells, security issues and complexity.')}
-      </div>
-    </div>`;
-
-  el('cvCode').value = `function login(req, res) {
+const REVIEW_PRESETS = [
+  {
+    name: 'Auth & SQL Injection',
+    filename: 'auth.js',
+    code: `function login(req, res) {
   var token = "sk-live-9f8a7b6c5d4e";
   if (req.body.role == "admin") {
     db.query("SELECT * FROM users WHERE email = '" + req.body.email + "'");
@@ -1442,41 +2154,298 @@ async function renderReview() {
   } catch (e) {}
   console.log("login attempt", req.body);
   document.getElementById("out").innerHTML = req.body.name;
-}`;
+}`,
+  },
+  {
+    name: 'Prototype Pollution & XSS',
+    filename: 'profile.js',
+    code: `function updateProfile(req, res) {
+  const target = {};
+  target["__proto__"]["isAdmin"] = req.body.role;
+  document.write("<h1>Welcome " + req.body.username + "</h1>");
+  const avatar = "javascript:alert(1)";
+  if (req.body.tier != 0) {
+    target.tier = req.body.tier;
+  }
+  // TODO: sanitize inputs and validate schema
+}`,
+  },
+  {
+    name: 'Command Injection & Path Traversal',
+    filename: 'export.js',
+    code: `const cp = require('child_process');
+const fs = require('fs');
 
+function exportReport(req, res) {
+  const filename = req.query.file;
+  const content = fs.readFileSync("../reports/" + filename);
+  cp.exec("gzip -c " + filename + " > output.gz");
+  var apiKey = "AKIAIOSFODNN7EXAMPLE";
+  debugger;
+}`,
+  },
+  {
+    name: 'Insecure Crypto & Random',
+    filename: 'reset.js',
+    code: `const crypto = require('crypto');
+
+function generateResetToken(user) {
+  const hash = crypto.createHash('md5').update(user.email).digest('hex');
+  const tempToken = Math.random().toString(36).substring(2);
+  if (user.secretToken == tempToken) {
+    return true;
+  }
+  alert("Password reset requested");
+}`,
+  },
+  {
+    name: 'Clean & Secure Code',
+    filename: 'auth-secure.js',
+    code: `import crypto from 'node:crypto';
+
+export async function authenticateUser(db, email, providedPassword) {
+  if (!email || typeof email !== 'string') {
+    throw new TypeError('Valid email address required');
+  }
+
+  // Parameterized query blocks SQL injection
+  const user = await db.query('SELECT id, password_hash FROM users WHERE email = $1', [email.trim().toLowerCase()]);
+  if (!user) return null;
+
+  // Constant-time comparison prevents timing attacks
+  const match = await verifyPassword(providedPassword, user.password_hash);
+  if (!match) return null;
+
+  return {
+    userId: user.id,
+    sessionToken: crypto.randomUUID(),
+  };
+}`,
+  },
+];
+
+let reviewSevFilter = 'all';
+let activeReviewPresetIdx = 0;
+let lastReviewResult = null;
+
+function renderReviewFindings(r) {
+  const resCard = el('cvResult');
+  if (!resCard || !r) return;
+
+  const gradeColour = r.score >= 85 ? '#10b981' : r.score >= 70 ? '#3b82f6' : r.score >= 50 ? '#f59e0b' : '#ef4444';
+  const findings = r.findings || [];
+
+  const sevCounts = {
+    all: findings.length,
+    critical: findings.filter((f) => f.severity === 'critical').length,
+    high: findings.filter((f) => f.severity === 'high').length,
+    medium: findings.filter((f) => f.severity === 'medium').length,
+    low: findings.filter((f) => f.severity === 'low').length,
+  };
+
+  const displayedFindings = reviewSevFilter === 'all'
+    ? findings
+    : findings.filter((f) => f.severity === reviewSevFilter);
+
+  resCard.innerHTML = `
+    <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:14px">
+      <div>
+        <h3 style="margin:0">${esc(r.filename)}</h3>
+        <span class="muted" style="font-size:12px">Reviewed ${new Date().toLocaleTimeString()}</span>
+      </div>
+      <div style="text-align:right">
+        <div style="font-size:32px;font-weight:800;line-height:1;color:${gradeColour}">${r.grade}</div>
+        <div class="muted" style="font-size:12.5px;margin-top:2px">Score: <strong>${r.score}</strong>/100</div>
+      </div>
+    </div>
+
+    ${meter(r.score)}
+
+    <!-- Metrics Bar -->
+    <div class="grid cols-4" style="margin:14px 0;padding:12px;background:var(--bg-2);border-radius:10px">
+      ${[
+        ['Lines', r.metrics.lines],
+        ['Functions', r.metrics.functions],
+        ['Complexity', r.metrics.complexity],
+        ['Max Depth', r.metrics.maxDepth],
+      ].map(([k, v]) => `
+        <div style="text-align:center">
+          <div class="label muted" style="font-size:11px;text-transform:uppercase">${k}</div>
+          <strong style="font-size:18px">${v}</strong>
+        </div>
+      `).join('')}
+    </div>
+
+    ${r.aiInsights ? `
+      <div class="ai-review-card">
+        <div class="ai-review-header">
+          <span>✦</span> AI Security & Architecture Insights
+        </div>
+        <div class="ai-review-content">${esc(r.aiInsights)}</div>
+      </div>
+    ` : ''}
+
+    <!-- Findings Header & Filter Tabs -->
+    <div class="row" style="justify-content:space-between;align-items:center;margin:16px 0 10px;flex-wrap:wrap;gap:8px">
+      <h3 style="margin:0">${findings.length} finding${findings.length === 1 ? '' : 's'}</h3>
+      <div class="tab-group" style="font-size:12px">
+        ${[
+          ['all', `All (${sevCounts.all})`],
+          ['critical', `Critical (${sevCounts.critical})`],
+          ['high', `High (${sevCounts.high})`],
+          ['medium', `Medium (${sevCounts.medium})`],
+          ['low', `Low (${sevCounts.low})`],
+        ].map(([sev, label]) => `
+          <button class="btn ${reviewSevFilter === sev ? 'primary' : ''}" data-review-filter="${sev}" style="padding:4px 9px;font-size:11.5px">${label}</button>
+        `).join('')}
+      </div>
+    </div>
+
+    <!-- Findings List -->
+    <div id="findingsContainer">
+      ${displayedFindings.length ? displayedFindings.map((f, idx) => `
+        <div class="finding ${f.severity}">
+          <div class="row" style="justify-content:space-between;align-items:center">
+            <span class="pill ${SEVERITY_PILL[f.severity]}">${esc(f.severity)}</span>
+            <span class="muted" style="font-size:12px;font-family:monospace">${f.line ? `Line ${f.line}` : 'File level'}</span>
+          </div>
+          <div style="margin-top:6px;font-weight:600;color:var(--text);font-size:13.5px">${esc(f.message)}</div>
+          ${f.code ? `<pre class="code" style="margin-top:7px;padding:8px 12px;font-size:12px">${esc(f.code)}</pre>` : ''}
+          <div class="finding-fix-box">
+            <div class="finding-fix-text"><strong>Fix:</strong> ${esc(f.suggestion)}</div>
+            <button class="copy-fix-btn" data-copy-fix="${esc(f.suggestion)}" id="copyFixBtn_${idx}" title="Copy suggested fix to clipboard">
+              📋 Copy Fix
+            </button>
+          </div>
+        </div>
+      `).join('') : findings.length ? `
+        <div style="text-align:center;padding:24px;color:var(--muted)">
+          No findings with severity "${reviewSevFilter}".
+        </div>
+      ` : `
+        <div style="text-align:center;padding:32px 16px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px">
+          <div style="font-size:28px;margin-bottom:6px">🎉</div>
+          <h4 style="color:#166534;margin:0 0 4px">Clean & Secure Code!</h4>
+          <p class="muted" style="margin:0;font-size:13px">No code smells, security vulnerabilities, or anti-patterns detected.</p>
+        </div>
+      `}
+    </div>
+  `;
+
+  // Attach filter buttons
+  resCard.querySelectorAll('[data-review-filter]').forEach((btn) => {
+    btn.onclick = () => {
+      reviewSevFilter = btn.dataset.reviewFilter;
+      renderReviewFindings(lastReviewResult);
+    };
+  });
+
+  // Attach copy fix buttons
+  resCard.querySelectorAll('[data-copy-fix]').forEach((btn) => {
+    btn.onclick = async () => {
+      const text = btn.dataset.copyFix;
+      try {
+        await navigator.clipboard.writeText(text);
+        btn.classList.add('copied');
+        btn.innerHTML = '✓ Copied!';
+        toast('Suggested fix copied to clipboard.');
+        setTimeout(() => {
+          btn.classList.remove('copied');
+          btn.innerHTML = '📋 Copy Fix';
+        }, 2000);
+      } catch {
+        // Fallback for clipboard
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        btn.classList.add('copied');
+        btn.innerHTML = '✓ Copied!';
+        toast('Suggested fix copied to clipboard.');
+        setTimeout(() => {
+          btn.classList.remove('copied');
+          btn.innerHTML = '📋 Copy Fix';
+        }, 2000);
+      }
+    };
+  });
+}
+
+async function renderReview() {
+  el('view').innerHTML = `
+    <div class="grid cols-2" style="align-items:start">
+      <div class="card">
+        <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:8px">
+          <h3 style="margin:0">Submit code for review</h3>
+          <span class="muted" style="font-size:12px">Static Heuristics + AI</span>
+        </div>
+
+        <!-- Sample Presets Bar -->
+        <div style="margin-bottom:12px">
+          <div class="muted" style="font-size:11.5px;font-weight:600;text-transform:uppercase;margin-bottom:6px">Load Sample Scenario:</div>
+          <div class="review-preset-bar">
+            ${REVIEW_PRESETS.map((p, idx) => `
+              <button class="review-preset-btn ${idx === activeReviewPresetIdx ? 'active' : ''}" data-preset-idx="${idx}">
+                ${esc(p.name)}
+              </button>
+            `).join('')}
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="cvName">File name</label>
+          <input id="cvName" value="${esc(REVIEW_PRESETS[activeReviewPresetIdx].filename)}">
+        </div>
+
+        <div class="field">
+          <label for="cvCode">Source Code</label>
+          <textarea id="cvCode" rows="16" spellcheck="false" style="font-family:ui-monospace,Consolas,monospace;font-size:13px;line-height:1.5">${esc(REVIEW_PRESETS[activeReviewPresetIdx].code)}</textarea>
+        </div>
+
+        <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:14px">
+          <label class="row" style="gap:7px;font-size:13px;cursor:pointer;user-select:none">
+            <input type="checkbox" id="cvUseAI" checked style="width:16px;height:16px">
+            <span>Include AI Security & Architecture summary</span>
+          </label>
+        </div>
+
+        <button class="btn primary block" id="cvRun">Review code</button>
+      </div>
+
+      <div class="card" id="cvResult">
+        ${emptyState('⌘', 'Paste a snippet or select a preset scenario, then click "Review code" to analyze vulnerabilities, code smells, and complexity.')}
+      </div>
+    </div>`;
+
+  // Attach Preset buttons
+  el('view').querySelectorAll('[data-preset-idx]').forEach((btn) => {
+    btn.onclick = () => {
+      const idx = Number(btn.dataset.presetIdx);
+      activeReviewPresetIdx = idx;
+      el('cvName').value = REVIEW_PRESETS[idx].filename;
+      el('cvCode').value = REVIEW_PRESETS[idx].code;
+      el('view').querySelectorAll('[data-preset-idx]').forEach((b, i) => {
+        b.classList.toggle('active', i === idx);
+      });
+    };
+  });
+
+  // Attach Run Review button
   el('cvRun').addEventListener('click', async () => {
     const button = el('cvRun');
+    const code = el('cvCode').value;
+    const filename = el('cvName').value.trim() || 'snippet.js';
+    const useAI = el('cvUseAI') ? el('cvUseAI').checked : true;
+
     button.disabled = true;
     button.innerHTML = '<span class="spinner"></span> Reviewing…';
     try {
-      const r = await api.post(`${P()}/review`, { code: el('cvCode').value, filename: el('cvName').value });
-      const gradeColour = r.score >= 75 ? 'var(--ok)' : r.score >= 50 ? 'var(--warn)' : 'var(--bad)';
-      el('cvResult').innerHTML = `
-        <div class="row" style="justify-content:space-between;margin-bottom:14px">
-          <h3 style="margin:0">${esc(r.filename)}</h3>
-          <div style="text-align:right">
-            <div style="font-size:30px;font-weight:700;line-height:1;color:${gradeColour}">${r.grade}</div>
-            <div class="muted" style="font-size:12.5px">${r.score}/100</div>
-          </div>
-        </div>
-        ${meter(r.score)}
-        <div class="grid cols-4" style="margin:14px 0">
-          ${[['Lines', r.metrics.lines], ['Functions', r.metrics.functions],
-             ['Complexity', r.metrics.complexity], ['Max depth', r.metrics.maxDepth]].map(([k, v]) => `
-            <div><div class="label muted" style="font-size:11px;text-transform:uppercase">${k}</div><strong style="font-size:19px">${v}</strong></div>`).join('')}
-        </div>
-        <h3>${r.findings.length} finding${r.findings.length === 1 ? '' : 's'}</h3>
-        ${r.findings.length ? r.findings.map((f) => `
-          <div class="finding ${f.severity}">
-            <div class="row" style="justify-content:space-between">
-              <span class="pill ${SEVERITY_PILL[f.severity]}">${esc(f.severity)}</span>
-              <span class="muted" style="font-size:12.5px">${f.line ? `line ${f.line}` : 'file level'}</span>
-            </div>
-            <div style="margin-top:6px">${esc(f.message)}</div>
-            ${f.code ? `<pre class="code" style="margin-top:7px">${esc(f.code)}</pre>` : ''}
-            <div class="fix">→ ${esc(f.suggestion)}</div>
-          </div>`).join('')
-        : '<p class="muted">No issues found in this snippet.</p>'}`;
+      const r = await api.post(`${P()}/review`, { code, filename, useAI });
+      lastReviewResult = r;
+      reviewSevFilter = 'all';
+      renderReviewFindings(r);
     } catch (err) {
       el('cvResult').innerHTML = `<p class="error">${esc(err.message)}</p>`;
     } finally {
@@ -2662,12 +3631,47 @@ function openRunStepsModal(run) {
 
 const chatLog = [];
 
+function formatAssistantMessage(raw) {
+  if (!raw) return '';
+  let s = esc(raw);
+
+  // Fenced code blocks ```lang ... ```
+  s = s.replace(/```(?:[a-zA-Z0-9_-]+)?\r?\n([\s\S]*?)```/g, (_match, code) => {
+    return `<pre class="code"><code>${code.trim()}</code></pre>`;
+  });
+
+  // Inline code `...`
+  s = s.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+
+  // Headers ###, ##
+  s = s.replace(/^### (.*$)/gim, '<h4>$1</h4>');
+  s = s.replace(/^## (.*$)/gim, '<h4>$1</h4>');
+
+  // Bold **...**
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+
+  // Bullet points
+  s = s.replace(/^\s*[-*•]\s+(.*)$/gim, '<li>$1</li>');
+
+  // Wrap lists
+  s = s.replace(/((?:<li>.*<\/li>\s*)+)/g, '<ul>$1</ul>');
+
+  // Line breaks outside tags
+  s = s.replace(/\n/g, '<br>');
+  s = s.replace(/(<\/h4>)<br>/g, '$1');
+  s = s.replace(/(<\/pre>)<br>/g, '$1');
+  s = s.replace(/(<\/ul>)<br>/g, '$1');
+  s = s.replace(/(<\/li>)<br>/g, '$1');
+
+  return s;
+}
+
 async function renderAssistant() {
   el('view').innerHTML = `
     <div class="grid cols-2">
       <div class="card">
-        <div class="panel-heading"><h3><span class="panel-icon blue">✦</span> Project queries</h3></div>
-        <p class="muted">Ask questions in plain English and get answers from this project's live requirements, work, defects and risks.</p>
+        <div class="panel-heading"><h3><span class="panel-icon blue">✦</span> Engineering &amp; Project Assistant</h3></div>
+        <p class="muted">Ask any question in plain English &mdash; from project requirements, tasks, defects and architecture to general programming, system design, and debugging.</p>
       </div>
       <div class="card">
         <div class="panel-heading"><h3><span class="panel-icon violet">▤</span> Team intelligence</h3></div>
@@ -2680,16 +3684,23 @@ async function renderAssistant() {
     </div>
     <div class="card">
       <div class="chat" id="chat">
-        ${chatLog.length ? chatLog.map((m) => `<div class="msg ${m.role}">${esc(m.text)}</div>`).join('')
-          : `<div class="msg bot">Ask me about <strong>${esc(state.project.name)}</strong>. I answer from this project's live data — try "what is our progress?", "how many bugs are open?", "who has the most work?" or "what are the risks?".</div>`}
+        ${chatLog.length ? chatLog.map((m) => `<div class="msg ${m.role}">${m.role === 'bot' ? formatAssistantMessage(m.text) : esc(m.text)}</div>`).join('')
+          : `<div class="msg bot">Hello! I am your <strong>EngineerOS AI Assistant</strong>. Ask me <strong>any question</strong> &mdash; about <strong>${esc(state.project.name)}</strong> (requirements, tasks, bugs, architecture, database schema, team), or general software engineering, system design, code snippets, testing, and debugging!</div>`}
       </div>
       <form class="row" id="chatForm">
-        <input id="chatInput" class="grow" placeholder="Ask about progress, requirements, defects, workload or risks…" autocomplete="off">
-        <button class="btn primary" type="submit">Ask</button>
+        <input id="chatInput" class="grow" placeholder="Ask any question about this project, coding, architecture, design or debugging..." autocomplete="off">
+        <button class="btn primary" id="chatSubmitBtn" type="submit">Ask</button>
       </form>
-      <div class="row" style="margin-top:12px">
-        ${['What is our progress?', 'How many bugs are open?', 'Who has the most work?', 'What are the risks?']
-          .map((q) => `<button class="btn small" data-q="${esc(q)}">${esc(q)}</button>`).join('')}
+      <div class="row" style="margin-top:12px;gap:8px">
+        ${[
+          'What is our overall progress?',
+          'What are our open bugs & how to fix them?',
+          'Recommend architecture & tech stack',
+          'How do I implement JWT authentication?',
+          'Write a unit test for login',
+          'Explain our database tables and relations',
+          'What are agile sprint best practices?'
+        ].map((q) => `<button class="btn small ghost" data-q="${esc(q)}">${esc(q)}</button>`).join('')}
       </div>
     </div>`;
 
@@ -2751,21 +3762,51 @@ async function renderAssistant() {
   const say = (role, text) => {
     const bubble = document.createElement('div');
     bubble.className = `msg ${role}`;
-    bubble.textContent = text;
+    if (role === 'bot') {
+      bubble.innerHTML = formatAssistantMessage(text);
+    } else {
+      bubble.textContent = text;
+    }
     el('chat').append(bubble);
     el('chat').scrollTop = el('chat').scrollHeight;
+    return bubble;
   };
 
   const ask = async (question) => {
-    if (!question.trim()) return;
-    chatLog.push({ role: 'me', text: question });
-    say('me', question);
+    if (!question || !question.trim()) return;
+    const q = question.trim();
+    chatLog.push({ role: 'me', text: q });
+    say('me', q);
+
+    const submitBtn = el('chatSubmitBtn');
+    const input = el('chatInput');
+    if (submitBtn) submitBtn.disabled = true;
+    if (input) input.disabled = true;
+
+    // Show temporary thinking bubble
+    const thinkingBubble = document.createElement('div');
+    thinkingBubble.className = 'msg bot thinking';
+    thinkingBubble.id = 'chatThinking';
+    thinkingBubble.innerHTML = '<span class="muted" style="display:flex;align-items:center;gap:6px">Thinking...</span>';
+    el('chat').append(thinkingBubble);
+    el('chat').scrollTop = el('chat').scrollHeight;
+
     try {
-      const { answer } = await api.post(`${P()}/ask`, { question });
+      const { answer } = await api.post(`${P()}/ask`, { question: q });
+      thinkingBubble.remove();
       chatLog.push({ role: 'bot', text: answer });
       say('bot', answer);
     } catch (err) {
-      say('bot', err.message);
+      thinkingBubble.remove();
+      const errText = err.message || 'Failed to get an answer.';
+      chatLog.push({ role: 'bot', text: errText });
+      say('bot', errText);
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
+      if (input) {
+        input.disabled = false;
+        input.focus();
+      }
     }
   };
 
@@ -2804,7 +3845,19 @@ async function renderTeam() {
         <thead><tr><th>Name</th><th>Email</th><th>Role</th><th></th></tr></thead>
         <tbody>${members.map((m) => `
           <tr>
-            <td><strong>${esc(m.name)}</strong></td>
+            <td>
+              <div class="member-avatar-cell">
+                <span class="member-avatar ${m.avatar_url ? 'has-photo' : ''}">
+                  ${m.avatar_url
+                    ? `<img src="${esc(m.avatar_url)}" alt="${esc(m.name)}" onerror="this.onerror=null;this.parentElement.textContent='${esc(m.name.charAt(0).toUpperCase())}';">`
+                    : esc(m.name.charAt(0).toUpperCase())}
+                </span>
+                <div>
+                  <strong>${esc(m.name)}</strong>
+                  ${m.github_username ? `<div class="muted" style="font-size:11px">@${esc(m.github_username)}</div>` : ''}
+                </div>
+              </div>
+            </td>
             <td class="muted">${esc(m.email)}</td>
             <td><span class="pill blue">${esc(m.role)}</span></td>
             <td>${m.id === state.project.owner_id ? '<span class="pill grey">owner</span>'
@@ -3253,8 +4306,14 @@ function setupNavigationLinks() {
     const { user } = await api.get('/auth/me');
     state.user = user;
     await startApp();
-  } catch {
+  } catch (err) {
+    console.error('Session initialization error:', err);
     token.clear();
+    const errorBox = el('authError');
+    if (errorBox) {
+      errorBox.textContent = `Session error: ${err.message || 'Could not restore session.'}`;
+      errorBox.classList.remove('hidden');
+    }
   }
 })();
 

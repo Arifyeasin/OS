@@ -66,7 +66,7 @@ router.post('/', (req, res) => {
 router.get('/:pid', loadProject, (req, res) => {
   res.json({
     ...req.project,
-    members: all(`SELECT u.id, u.name, u.email, u.github_username, m.role FROM members m
+    members: all(`SELECT u.id, u.name, u.email, u.github_username, u.avatar_url, m.role FROM members m
                   JOIN users u ON u.id = m.user_id WHERE m.project_id = ?`, req.project.id),
     sprints: all('SELECT * FROM sprints WHERE project_id = ? ORDER BY id', req.project.id),
     activity: all(`SELECT a.message, a.created_at, u.name AS user FROM activity a

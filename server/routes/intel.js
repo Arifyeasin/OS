@@ -3,11 +3,12 @@ import { Router } from 'express';
 import { all, get } from '../db.js';
 import { requireAuth } from '../auth.js';
 import { loadProject } from './projects.js';
-import { generateUML, reviewCode, detectConflicts } from '../ai.js';
+import { generateUML, reviewCode, detectConflicts, generateAICodeReview } from '../ai.js';
 import { projectRequirements } from './requirements.js';
 import { buildSRS, buildUniversitySRS, renderSRSHtml, renderSRSMarkdown, renderUniversitySRSHtml, renderUniversitySRSMarkdown } from '../srs.js';
 import { getProjectContext } from '../project-context.js';
 import { getArchitectureAndDBDesign } from '../architecture.js';
+import { askAssistant } from '../assistant.js';
 
 export const router = Router({ mergeParams: true });
 router.use(requireAuth, loadProject);
@@ -72,9 +73,14 @@ router.get('/traceability', (req, res) => {
   const orphanTasks = tasks.filter((t) => !t.requirement_id)
     .map((t) => ({ id: t.id, title: t.title, status: t.status }));
 
+  const linkedBugIds = new Set(chain.flatMap((c) => c.bugs.map((b) => b.id)));
+  const orphanBugs = bugs.filter((b) => !linkedBugIds.has(b.id))
+    .map((b) => ({ id: b.id, title: b.title, severity: b.severity, status: b.status, task_id: b.task_id }));
+
   res.json({
     chain,
     orphanTasks,
+    orphanBugs,
     covered: chain.filter((c) => !c.orphaned).length,
     total: chain.length,
     coveragePercent: chain.length ? Math.round((chain.filter((c) => !c.orphaned).length / chain.length) * 100) : 0,
@@ -161,88 +167,38 @@ router.get('/analytics', (req, res) => {
   });
 });
 
-router.post('/review', (req, res) => {
+router.post('/review', async (req, res) => {
   const code = String(req.body.code || '');
   if (code.trim().length < 10) return res.status(400).json({ error: 'Paste at least a few lines of code to review.' });
-  res.json(reviewCode(code, String(req.body.filename || 'snippet.js')));
+  const filename = String(req.body.filename || 'snippet.js');
+  const result = reviewCode(code, filename);
+
+  if (req.body.useAI) {
+    try {
+      const aiInsights = await generateAICodeReview(code, filename, result);
+      if (aiInsights) result.aiInsights = aiInsights;
+    } catch (e) {
+      console.warn('[Review AI warning]', e.message);
+    }
+  }
+
+  res.json(result);
 });
 
-// Natural-language questions answered from the project's own data.
-router.post('/ask', (req, res) => {
-  const q = String(req.body.question || '').trim().toLowerCase();
+// Natural-language questions answered from the project's own data and general engineering knowledge.
+router.post('/ask', async (req, res) => {
+  const q = String(req.body.question || '').trim();
   if (!q) {
-    return res.status(400).json({ error: 'Please enter a question about this project.' });
+    return res.status(400).json({ error: 'Please enter a question.' });
   }
 
-  const pid = req.project.id;
-  const tasks = all('SELECT * FROM tasks WHERE project_id = ?', pid);
-  const bugs = all('SELECT * FROM bugs WHERE project_id = ?', pid);
-  const requirements = projectRequirements(pid);
-  const members = all('SELECT u.name, m.role FROM members m JOIN users u ON u.id = m.user_id WHERE m.project_id = ? ORDER BY u.name', pid);
-  const match = (...words) => words.some((w) => q.includes(w));
-  const plural = (n, word, suffix = 's') => `${n} ${word}${n === 1 ? '' : suffix}`;
-
-  const totalPoints = tasks.reduce((s, t) => s + t.points, 0);
-  const donePoints = tasks.filter((t) => t.status === 'done').reduce((s, t) => s + t.points, 0);
-  const doneTasks = tasks.filter((t) => t.status === 'done').length;
-  const inProgressTasks = tasks.filter((t) => t.status === 'in_progress').length;
-  const openBugs = bugs.filter((b) => b.status !== 'resolved');
-  const bugCounts = Object.entries(openBugs.reduce((acc, b) => ({ ...acc, [b.severity]: (acc[b.severity] || 0) + 1 }), {}));
-  const avgQuality = requirements.length ? Math.round(requirements.reduce((s, r) => s + r.quality, 0) / requirements.length) : 0;
-  const lowQuality = requirements.filter((r) => r.quality < 60).length;
-  const reviewTasks = tasks.filter((t) => t.status === 'review').length;
-
-  const workload = new Map();
-  for (const t of tasks.filter((item) => item.status !== 'done')) {
-    const who = all('SELECT name FROM users WHERE id = ?', t.assignee_id)[0]?.name || 'Unassigned';
-    workload.set(who, (workload.get(who) || 0) + t.points);
+  try {
+    const answer = await askAssistant(req.project, q, req.user);
+    res.json({ question: q, answer });
+  } catch (err) {
+    console.error('[Assistant Error]', err);
+    res.status(500).json({ error: 'Failed to process assistant question: ' + err.message });
   }
-
-  let answer;
-
-  if (match('bug', 'defect', 'issue', 'error')) {
-    answer = openBugs.length
-      ? `There ${openBugs.length === 1 ? 'is' : 'are'} ${plural(openBugs.length, 'unresolved defect')}: ${bugCounts.map(([s, n]) => `${n} ${s}`).join(', ')}.`
-      : 'There are no unresolved defects on this project.';
-  } else if (match('progress', 'status', 'how far', 'done', 'complete', 'delivery', 'health', 'overall')) {
-    answer = tasks.length
-      ? `${doneTasks} of ${plural(tasks.length, 'task')} are done (${donePoints} of ${totalPoints} story points, ${totalPoints ? Math.round((donePoints / totalPoints) * 100) : 0}%). ${inProgressTasks} are currently in progress.`
-      : 'No tasks have been created yet, so there is no progress to report.';
-  } else if (match('requirement', 'scope', 'feature', 'story', 'goal', 'spec')) {
-    answer = requirements.length
-      ? `The project has ${requirements.length} requirements: ${requirements.filter((r) => r.kind === 'functional').length} functional and ${requirements.filter((r) => r.kind !== 'functional').length} non-functional. Average quality is ${avgQuality}/100, and ${requirements.filter((r) => r.issues.length).length} have review notes.`
-      : 'No requirements have been captured yet. Use the Requirements tab to generate them from a brief.';
-  } else if (match('who', 'assign', 'team', 'workload', 'member', 'assignee', 'owner')) {
-    answer = workload.size
-      ? `Open workload by person: ${[...workload.entries()].sort((a, b) => b[1] - a[1]).map(([n, p]) => `${n} (${p} pts)`).join(', ')}.`
-      : 'No open tasks are currently assigned.';
-  } else if (match('risk', 'blocked', 'concern', 'warning', 'threat')) {
-    answer = `Main risks: ${plural(openBugs.filter((b) => b.severity === 'critical').length, 'critical defect')} open, ${plural(lowQuality, 'requirement')} below a quality score of 60, and ${plural(reviewTasks, 'task')} waiting in review.`;
-  } else if (match('architecture', 'database', 'schema', 'sql', 'tech stack', 'tables', 'pattern', 'stack', 'design')) {
-    const context = getProjectContext(req.project);
-    const design = getArchitectureAndDBDesign(req.project, context.generatedRequirements);
-    if (match('database', 'schema', 'tables', 'sql', 'entity', 'entities')) {
-      const names = design.schema.entities.map((e) => e.table).join(', ');
-      answer = `Database design for "${req.project.name}": ${design.schema.entities.length} normalized tables (${names}) with ${design.schema.relationships.length} foreign-key relationships.`;
-    } else {
-      answer = `Architecture recommendation for "${req.project.name}": ${design.architecture.pattern} (${design.architecture.primaryStyle}). Recommended stack: Next.js + React, Node.js / Express, PostgreSQL 16, and Redis 7.`;
-    }
-  } else if (match('member', 'team', 'people', 'contributors')) {
-    answer = members.length
-      ? `This project currently has ${members.length} team members: ${members.map((m) => `${m.name} (${m.role || 'member'})`).join(', ')}.`
-      : 'No project members have been added yet.';
-  } else if (match('github', 'git', 'commit', 'pr', 'pull request', 'repo', 'action', 'workflow')) {
-    const repo = req.project.github_repo || 'arif-404-hub/OS';
-    answer = `Project "${req.project.name}" is linked to GitHub repository "${repo}". Open the ⌘ GitHub tab to view live repositories, recent commits, pull requests, issues, and CI/CD workflow runs.`;
-  } else {
-    const summaryBits = [];
-    summaryBits.push(`This project has ${tasks.length} tasks, ${requirements.length} requirements, and ${openBugs.length} open defect${openBugs.length === 1 ? '' : 's'}.`);
-    summaryBits.push(`Delivery is ${doneTasks}/${tasks.length || 0} tasks complete, or ${totalPoints ? Math.round((donePoints / totalPoints) * 100) : 0}% of the story points.`);
-    summaryBits.push(`Average requirement quality is ${avgQuality}/100, and ${members.length} team member${members.length === 1 ? '' : 's'} are on the project.`);
-    answer = `${summaryBits.join(' ')} If you want more detail, ask about progress, defects, requirements, workload, risks, architecture, or GitHub.`;
-  }
-
-  res.json({ question: req.body.question, answer });
 });
 
 function sentenceList(text) {

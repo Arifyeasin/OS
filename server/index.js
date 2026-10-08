@@ -19,7 +19,7 @@ const app = express();
 // Initialize PostgreSQL connection pool if configured
 initPostgres().catch(err => console.warn('[PostgreSQL Init]', err.message));
 
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '10mb' }));
 app.use(express.static(join(root, 'public')));
 app.use('/OS', express.static(join(root, 'public')));
 
@@ -27,16 +27,18 @@ const apiRouter = express.Router();
 apiRouter.get('/health', (_req, res) => res.json({ ok: true, service: 'EngineerOS', version: '1.0.0' }));
 apiRouter.use('/auth', authRouter);
 apiRouter.use('/organizations', organizationsRouter);
+apiRouter.use('/projects/:pid/requirements', requirementsRouter);
+apiRouter.use('/projects/:pid/github', githubRouter);
+apiRouter.use('/projects/:pid', workRouter);
+apiRouter.use('/projects/:pid', intelRouter);
 apiRouter.use('/projects', projectsRouter);
-// Project-scoped routers each re-check membership through loadProject.
-app.use('/api/projects/:pid/requirements', requirementsRouter);
-app.use('/api/projects/:pid', workRouter);
-app.use('/api/projects/:pid', intelRouter);
-app.use('/api/projects/:pid/github', githubRouter);
-app.use('/api/uml', umlRouter);
+apiRouter.use('/uml', umlRouter);
 
 app.use('/api', apiRouter);
 app.use('/OS/api', apiRouter);
+
+// Return JSON 404 for any unmatched API endpoints so they never return HTML
+app.all(['/api/*', '/OS/api/*'], (_req, res) => res.status(404).json({ error: 'API endpoint not found.' }));
 
 // Any non-API path falls through to the single-page client.
 app.get('*', (_req, res) => res.sendFile(join(root, 'public', 'index.html')));

@@ -507,14 +507,157 @@ export function generateUML(type, project, requirements) {
 // -------------------------------------------------------- Code review ------
 
 const REVIEW_RULES = [
-  { re: /\beval\s*\(/, sev: 'critical', msg: 'Use of eval() allows arbitrary code execution.', fix: 'Parse the value explicitly instead, e.g. JSON.parse.' },
-  { re: /(password|secret|api[_-]?key|token)\s*[:=]\s*["'][^"']{6,}["']/i, sev: 'critical', msg: 'Hard-coded credential in source.', fix: 'Move the value into an environment variable.' },
-  { re: /(SELECT|INSERT|UPDATE|DELETE)\b[^;]*["']\s*\+/i, sev: 'critical', msg: 'SQL built by string concatenation - injection risk.', fix: 'Use parameterised queries with ? placeholders.' },
-  { re: /\bvar\s+\w/, sev: 'low', msg: 'Legacy var declaration.', fix: 'Use const or let for block scoping.' },
-  { re: /[^=!<>]==[^=]/, sev: 'medium', msg: 'Loose equality (==) performs type coercion.', fix: 'Use === for predictable comparisons.' },
-  { re: /console\.(log|debug)\s*\(/, sev: 'low', msg: 'Debug logging left in the code.', fix: 'Remove it or route through a real logger.' },
-  { re: /catch\s*\([^)]*\)\s*\{\s*\}/, sev: 'high', msg: 'Empty catch block swallows errors silently.', fix: 'Log the error or rethrow it.' },
-  { re: /\.innerHTML\s*=/, sev: 'high', msg: 'Assignment to innerHTML can introduce XSS.', fix: 'Use textContent, or sanitise the input first.' },
+  // --- Critical Security Vulnerabilities ---
+  {
+    re: /\beval\s*\(/,
+    sev: 'critical',
+    msg: 'Arbitrary code execution risk with eval().',
+    fix: 'Use explicit parsing (e.g. JSON.parse) or structured data mapping instead of eval().',
+  },
+  {
+    re: /\bnew\s+Function\s*\(/,
+    sev: 'critical',
+    msg: 'Dynamic Function constructor allows arbitrary code execution similar to eval().',
+    fix: 'Refactor to standard function declarations or a safe expression evaluator.',
+  },
+  {
+    re: /(password|passwd|secret|api[_-]?key|jwt[_-]?secret|private[_-]?key|token|auth)\w*\s*[:=]\s*["'][^"']{6,}["']/i,
+    sev: 'critical',
+    msg: 'Hard-coded secret or credential detected in source.',
+    fix: 'Extract secrets to environment variables (e.g. process.env.API_KEY).',
+  },
+  {
+    re: /\b(AKIA[0-9A-Z]{16}|ghp_[a-zA-Z0-9]{36}|sk-(?:live|test|proj)?[a-zA-Z0-9_-]{12,})\b/,
+    sev: 'critical',
+    msg: 'Potential hardcoded cloud, GitHub, or API provider access token.',
+    fix: 'Revoke this credential immediately and supply it via an environment variable.',
+  },
+  {
+    re: /(SELECT|INSERT|UPDATE|DELETE)\b[^;]*["']\s*\+/i,
+    sev: 'critical',
+    msg: 'SQL query constructed via string concatenation (SQL Injection risk).',
+    fix: 'Use parameterized queries with placeholders ($1, ?, or named parameters).',
+  },
+  {
+    re: /(SELECT|INSERT|UPDATE|DELETE)\b[^;]*\$\{/i,
+    sev: 'critical',
+    msg: 'SQL query constructed via template literal interpolation (SQL Injection risk).',
+    fix: 'Use parameterized prepared statements instead of string interpolation.',
+  },
+  {
+    re: /\b(child_process|cp)\.(exec|execSync)\s*\([^)]*(\+|`|\$\{)/i,
+    sev: 'critical',
+    msg: 'Command injection vulnerability in shell execution.',
+    fix: 'Use execFile or spawn with an argument array instead of a raw concatenated shell string.',
+  },
+  {
+    re: /__proto__|constructor\s*\[\s*['"]prototype['"]\s*\]/,
+    sev: 'critical',
+    msg: 'Potential Prototype Pollution vulnerability via unchecked property traversal.',
+    fix: 'Use Object.create(null), validate property names against Object.keys, or use a Map.',
+  },
+  {
+    re: /fs\.(readFile|readFileSync|createReadStream|writeFile|writeFileSync)\s*\([^)]*(\+\s*req\.|\$\{\s*req\.|\.\.\/)/i,
+    sev: 'critical',
+    msg: 'Path traversal vulnerability in filesystem operation.',
+    fix: 'Sanitize path using path.basename() or resolve and assert it stays inside a safe root directory.',
+  },
+  {
+    re: /\.innerHTML\s*=|\.outerHTML\s*=|document\.write\s*\(/,
+    sev: 'high',
+    msg: 'Direct HTML injection sink (Cross-Site Scripting / XSS).',
+    fix: 'Use textContent, createElement, or sanitize with DOMPurify before assigning HTML.',
+  },
+  {
+    re: /javascript:\s*[^"']+/i,
+    sev: 'high',
+    msg: 'Inline javascript: URI scheme detected (potential XSS vector).',
+    fix: 'Avoid javascript: pseudoprotocol URLs; use an event listener with preventDefault().',
+  },
+
+  // --- High Severity Quality & Logic ---
+  {
+    re: /catch\s*\([^)]*\)\s*\{\s*\}/,
+    sev: 'high',
+    msg: 'Empty catch block silently swallows exceptions.',
+    fix: 'Log the error with context or re-throw: console.error(err); or throw err;',
+  },
+  {
+    re: /crypto\.createHash\s*\(\s*['"](md5|sha1)['"]\s*\)/i,
+    sev: 'high',
+    msg: 'Cryptographically broken or weak hash algorithm (MD5/SHA-1).',
+    fix: 'Use SHA-256 or bcrypt/argon2 for password hashing.',
+  },
+  {
+    re: /Math\.random\s*\(\s*\)\s*(\.toString|\*|\+)/,
+    sev: 'high',
+    msg: 'Math.random() is cryptographically insecure for tokens or identifiers.',
+    fix: 'Use crypto.randomUUID() or crypto.randomBytes(16) for unpredictable tokens.',
+  },
+  {
+    re: /(password|token|hash|secret)\s*===?\s*(req\.|\w+)/i,
+    sev: 'high',
+    msg: 'Potential timing attack when comparing authentication tokens with standard equality.',
+    fix: 'Use crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b)) for secret comparisons.',
+  },
+
+  // --- Medium Severity ---
+  {
+    re: /[^=!<>]==[^=]/,
+    sev: 'medium',
+    msg: 'Loose equality (==) performs implicit type coercion.',
+    fix: 'Use strict equality (===) for predictable comparisons.',
+  },
+  {
+    re: /[^=!<>!]!=[^=]/,
+    sev: 'medium',
+    msg: 'Loose inequality (!=) performs implicit type coercion.',
+    fix: 'Use strict inequality (!==) for predictable comparisons.',
+  },
+  {
+    re: /fs\.(readFileSync|writeFileSync|existsSync|statSync)\s*\(/,
+    sev: 'medium',
+    msg: 'Synchronous I/O in potentially asynchronous server context blocks event loop.',
+    fix: 'Use asynchronous fs.promises methods (e.g. await fs.promises.readFile(...)).',
+  },
+  {
+    re: /new\s+RegExp\s*\(\s*(req\.|input|query|params)/i,
+    sev: 'medium',
+    msg: 'Unescaped user input passed to RegExp constructor (ReDoS vulnerability).',
+    fix: 'Escape special regex characters or validate input against a strict whitelist.',
+  },
+  {
+    re: /(127\.0\.0\.1|localhost):\d{2,5}/,
+    sev: 'medium',
+    msg: 'Hardcoded local hostname or port in source.',
+    fix: 'Use environment variables (e.g. process.env.SERVICE_URL || "http://localhost:3000").',
+  },
+
+  // --- Low Severity ---
+  {
+    re: /\bvar\s+\w/,
+    sev: 'low',
+    msg: 'Legacy var declaration with function scoping and hoisting.',
+    fix: 'Replace var with const for immutable bindings or let for reassigned variables.',
+  },
+  {
+    re: /console\.(log|debug|trace)\s*\(/,
+    sev: 'low',
+    msg: 'Debug logging statement left in source.',
+    fix: 'Remove debug logging or replace with a structured logger (e.g., logger.info()).',
+  },
+  {
+    re: /\bdebugger\s*;?/,
+    sev: 'low',
+    msg: 'Leftover debugger breakpoint statement.',
+    fix: 'Remove debugger statement before deploying to production.',
+  },
+  {
+    re: /\balert\s*\(/,
+    sev: 'low',
+    msg: 'Synchronous blocking alert() call degrades user experience.',
+    fix: 'Use non-blocking UI notifications or modals instead of native alert().',
+  },
 ];
 
 /** Static heuristic review of a code snippet. */
@@ -526,7 +669,7 @@ export function reviewCode(code, filename = 'snippet.js') {
   lines.forEach((line, i) => {
     const isComment = /^\s*(\/\/|\*|#)/.test(line);
     if (isComment) {
-      if (/\b(TODO|FIXME|HACK)\b/i.test(line)) {
+      if (/\b(TODO|FIXME|HACK|BUG|XXX)\b/i.test(line)) {
         findings.push({ line: i + 1, severity: 'low', message: 'Unresolved TODO/FIXME marker.', suggestion: 'Track this as a task instead of a comment.', code: line.trim().slice(0, 120) });
       }
       return;
@@ -563,6 +706,48 @@ export function reviewCode(code, filename = 'snippet.js') {
     grade: score >= 90 ? 'A' : score >= 75 ? 'B' : score >= 60 ? 'C' : score >= 40 ? 'D' : 'F',
     findings: findings.sort((a, b) => order[a.severity] - order[b.severity] || a.line - b.line),
   };
+}
+
+/**
+ * Optional LLM-driven code review enrichment pass.
+ * Returns null when unavailable so callers fall back seamlessly to heuristic output.
+ */
+export async function generateAICodeReview(code, filename, heuristicResult) {
+  if (process.env.OPENAI_API_KEY) {
+    try {
+      const OpenAI = (await import('openai')).default;
+      const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+      const prompt = `You are a senior principal security engineer and architect. Review this code file (${filename}):
+\`\`\`
+${code.slice(0, 4000)}
+\`\`\`
+Static scan found ${heuristicResult.findings.length} findings, with overall Grade: ${heuristicResult.grade} (Score: ${heuristicResult.score}/100).
+Summarize in 3 concise, highly actionable bullet points:
+- Key security risk or vulnerability
+- Architecture / code smell assessment
+- Recommended priority fix or refactor`;
+
+      const response = await client.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 350,
+        temperature: 0.2,
+      });
+
+      return response.choices[0]?.message?.content?.trim() || null;
+    } catch (e) {
+      console.warn('[AI Code Review OpenAI error]', e.message);
+    }
+  }
+
+  if (process.env.OLLAMA_URL) {
+    try {
+      const res = await refineWithLLM(`Provide a brief code review for ${filename}:\n${code.slice(0, 2000)}`);
+      if (res) return res;
+    } catch (_) {}
+  }
+
+  return null;
 }
 
 /**

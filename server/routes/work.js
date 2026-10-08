@@ -34,7 +34,9 @@ const listBugs = (pid) => all(`
   SELECT b.*, t.title AS task_title FROM bugs b
   LEFT JOIN tasks t ON t.id = b.task_id
   WHERE b.project_id = ? ORDER BY
-    CASE b.severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, b.id DESC`, pid);
+    CASE WHEN b.status = 'resolved' THEN 1 ELSE 0 END,
+    CASE b.severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
+    b.id DESC`, pid);
 
 // ---------------------------------------------------------------- tasks ----
 
@@ -132,11 +134,21 @@ router.post('/bugs', (req, res) => {
     return shared / Math.max(1, Math.min(words.size, other.size)) > 0.7;
   });
 
+  const rawSev = String(req.body.severity || '').toLowerCase();
+  const severity = SEVERITIES.includes(rawSev) ? rawSev : 'medium';
+
+  let taskId = null;
+  if (req.body.task_id && !isNaN(Number(req.body.task_id))) {
+    const candidateId = Number(req.body.task_id);
+    const taskExists = get('SELECT 1 FROM tasks WHERE id = ? AND project_id = ?', candidateId, req.project.id);
+    taskId = taskExists ? candidateId : null;
+  }
+
   run('INSERT INTO bugs (project_id, task_id, title, detail, severity, status) VALUES (?, ?, ?, ?, ?, ?)',
     req.project.id,
-    req.body.task_id ? Number(req.body.task_id) : null,
+    taskId,
     title, String(req.body.detail || '').trim(),
-    SEVERITIES.includes(req.body.severity) ? req.body.severity : 'medium',
+    severity,
     'open');
 
   log(req.project.id, req.user.id, `reported bug "${title}"`);
@@ -147,14 +159,42 @@ router.patch('/bugs/:bid', (req, res) => {
   const bug = get('SELECT * FROM bugs WHERE id = ? AND project_id = ?', Number(req.params.bid), req.project.id);
   if (!bug) return res.status(404).json({ error: 'Bug not found.' });
 
-  run('UPDATE bugs SET status = ?, severity = ? WHERE id = ?',
-    BUG_STATUSES.includes(req.body.status) ? req.body.status : bug.status,
-    SEVERITIES.includes(req.body.severity) ? req.body.severity : bug.severity,
-    bug.id);
+  const title = req.body.title !== undefined ? String(req.body.title).trim() : bug.title;
+  if (title.length < 3) return res.status(400).json({ error: 'Give the bug a title of at least 3 characters.' });
+
+  const detail = req.body.detail !== undefined ? String(req.body.detail).trim() : bug.detail;
+
+  let taskId = bug.task_id;
+  if (req.body.task_id !== undefined) {
+    if (req.body.task_id && !isNaN(Number(req.body.task_id))) {
+      const candidateId = Number(req.body.task_id);
+      const taskExists = get('SELECT 1 FROM tasks WHERE id = ? AND project_id = ?', candidateId, req.project.id);
+      taskId = taskExists ? candidateId : null;
+    } else {
+      taskId = null;
+    }
+  }
+
+  const rawStatus = req.body.status !== undefined ? String(req.body.status).toLowerCase() : bug.status;
+  const status = BUG_STATUSES.includes(rawStatus) ? rawStatus : bug.status;
+
+  const rawSev = req.body.severity !== undefined ? String(req.body.severity).toLowerCase() : bug.severity;
+  const severity = SEVERITIES.includes(rawSev) ? rawSev : bug.severity;
+
+  run('UPDATE bugs SET title = ?, detail = ?, task_id = ?, status = ?, severity = ? WHERE id = ?',
+    title, detail, taskId, status, severity, bug.id);
+  log(req.project.id, req.user.id, `updated bug "${title}"`);
   res.json(listBugs(req.project.id));
 });
 
 router.delete('/bugs/:bid', (req, res) => {
-  run('DELETE FROM bugs WHERE id = ? AND project_id = ?', Number(req.params.bid), req.project.id);
+  const bug = get('SELECT * FROM bugs WHERE id = ? AND project_id = ?', Number(req.params.bid), req.project.id);
+  if (bug) {
+    run('DELETE FROM bugs WHERE id = ? AND project_id = ?', bug.id, req.project.id);
+    try {
+      run("DELETE FROM github_links WHERE project_id = ? AND target_type = 'bug' AND target_id = ?", req.project.id, bug.id);
+    } catch {}
+    log(req.project.id, req.user.id, `deleted bug "${bug.title}"`);
+  }
   res.json(listBugs(req.project.id));
 });

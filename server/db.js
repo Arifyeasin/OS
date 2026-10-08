@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS users (
   email      TEXT NOT NULL UNIQUE,
   password   TEXT NOT NULL,
   role       TEXT NOT NULL DEFAULT 'DEVELOPER',
+  avatar_url TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -198,7 +199,10 @@ CREATE TABLE IF NOT EXISTS activity (
 );
 `);
 
-// Add user GitHub profile identity fields
+// Add user GitHub profile identity and avatar fields
+try { db.exec("ALTER TABLE users ADD COLUMN avatar_url TEXT NOT NULL DEFAULT ''"); } catch (error) {
+  if (!String(error.message).includes('duplicate column name')) throw error;
+}
 try { db.exec("ALTER TABLE users ADD COLUMN github_username TEXT NOT NULL DEFAULT ''"); } catch (error) {
   if (!String(error.message).includes('duplicate column name')) throw error;
 }

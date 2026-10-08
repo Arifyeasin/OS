@@ -60,7 +60,7 @@ export function readToken(token) {
 export function requireAuth(req, res, next) {
   const payload = readToken((req.headers.authorization || '').replace(/^Bearer /, ''));
   if (!payload) return res.status(401).json({ error: 'Not authenticated' });
-  const user = get('SELECT id, name, email, role, github_username, github_token FROM users WHERE id = ?', payload.id);
+  const user = get('SELECT id, name, email, role, avatar_url, github_username, github_token FROM users WHERE id = ?', payload.id);
   if (!user) return res.status(401).json({ error: 'Account no longer exists' });
   req.user = user;
   next();
